@@ -35,18 +35,26 @@ function render(el, container) {
     // 记录下本次渲染的根节点
     nextWorkOfUnit = wipRoot;
 }
+
 // work in progress 正在工作中的root
 let wipRoot = null; // 用于判断当前渲染是否完成
 let currentRoot = null; // 当前root节点，用于update
 let nextWorkOfUnit = null; // 下一个要执行的任务
+let deletions = []; // 保存要删除的节点
+let wipFiber = null; // 表示正在更新的fiber组件
+
 function workLoop(deadline) {
     let shouldYield = false;
     while (!shouldYield && nextWorkOfUnit) {
         // console.log("fiber:",lodash.cloneDeep(nextWorkOfUnit));
         // run task
         nextWorkOfUnit = performWorkOfUnit(nextWorkOfUnit); // 默认继续执行下一个任务，返回下一个任务
+        // 如果下一个节点是当前root的兄弟节点，那么结束，因为我们不需要更新兄弟节点, type其实是function component
+        if(wipRoot?.sibling?.type === nextWorkOfUnit?.type){
+            console.log("hit",wipRoot,nextWorkOfUnit);
+            nextWorkOfUnit = null;
+        }
         // 空闲时间<1 表示当前任务所在空闲时间不足，下一个空闲周期继续run task
-        // 但是电脑性能太好了，为了避免卡死，建议 先改为 <40
         shouldYield = deadline.timeRemaining() < 1;
     }
     // console.log("time:",deadline.timeRemaining());
@@ -60,10 +68,24 @@ function workLoop(deadline) {
 
 // 把dom操作统一提交给root，而不是单独操作dom
 function commitRoot() {
+    deletions.forEach(commitDeletion)
     commitWork(wipRoot.child); // 根节点
     // console.log("root:",root);
     currentRoot = wipRoot;
     wipRoot = null; // 表示本轮渲染结束
+    deletions = []; // 已经删除完毕，恢复
+}
+
+function commitDeletion(fiber) {
+    if (fiber.dom) {
+        let fiberParent = fiber.parent;
+        while (!fiberParent.dom) {
+            fiberParent = fiberParent.parent;
+        }
+        fiberParent.dom.removeChild(fiber.dom);
+    } else {
+        commitDeletion(fiber.child);
+    }
 }
 
 // 从根节点往下提交
@@ -132,6 +154,7 @@ function updateProps(dom, nextProps, prevProps) {
         }
     });
 }
+
 // reconcile调和
 function reconcileChildren(fiber, children) {
     let oldFiber = fiber.alternate?.child;
@@ -139,7 +162,7 @@ function reconcileChildren(fiber, children) {
     children.forEach((child, index) => {
         // 其实就是判断元素tagName是否变化了
         const isSameType = oldFiber && oldFiber.type === child.type;
-        let newFiber;
+        let newFiber = null;
         if (isSameType) {
             newFiber = {
                 type: child.type,
@@ -152,15 +175,21 @@ function reconcileChildren(fiber, children) {
                 alternate: oldFiber
             };
         } else {
-            newFiber = {
-                type: child.type,
-                props: child.props,
-                child: null,
-                parent: fiber,
-                sibling: null,
-                dom: null,
-                effectTag: "placement" // 表示直接替换
-            };
+            if (child) {
+                newFiber = {
+                    type: child.type,
+                    props: child.props,
+                    child: null,
+                    parent: fiber,
+                    sibling: null,
+                    dom: null,
+                    effectTag: "placement" // 表示直接替换
+                };
+            }
+            if (oldFiber) {
+                // console.log("should delete", oldFiber);
+                deletions.push(oldFiber);
+            }
         }
         // 因为第一个child处理完了，我们需要更改 oldFiber， 使得我们可以指向 child.sibling 的备用 oldFiber.sibling
         if (oldFiber) {
@@ -172,12 +201,24 @@ function reconcileChildren(fiber, children) {
         } else {
             prevChild.sibling = newFiber; // b的兄弟节点sibling -> 指向c
         }
-        prevChild = newFiber;
+        // "a" false "b" -> 我们需要跳过false，这不是一个fiber,所以b还是需要依靠a指向
+        if (newFiber) {
+            prevChild = newFiber;
+        }
     });
+    // console.log(oldFiber);
+    // 旧的多，新的少，删除对应多出来的节点
+    while (oldFiber) {
+        deletions.push(oldFiber);
+        oldFiber = oldFiber.sibling;
+    }
 }
 
 // 函数式组件写法
 function updateFunctionComponent(fiber) {
+    // 在初始化的时候，也会走performWorkOfUnit -> updateFunctionComponent -> 设置 wipFiber
+    // 并且由于函数初始化fiber.type调用就是调用函数，所以也会走update()函数，取得 wipFiber 闭包
+    wipFiber = fiber; // 函数组件更新，设置当前更新fiber
     const children = [fiber.type(fiber.props)]
     reconcileChildren(fiber, children);
 }
@@ -199,9 +240,9 @@ function updateHostComponent(fiber) {
 function performWorkOfUnit(fiber) {
     const isFunctionComponent = typeof fiber.type === 'function';
     if (isFunctionComponent) {
-        updateFunctionComponent(fiber)
+        updateFunctionComponent(fiber);
     } else {
-        updateHostComponent(fiber)
+        updateHostComponent(fiber);
     }
     // 3. 转换链表，设置好指针 这一步在update一起做了
     // 例子： performWorkOfUnit(a), b->c 是child
@@ -225,16 +266,20 @@ function performWorkOfUnit(fiber) {
 
 // 只要程序在执行，那么就会循环 requestIdleCallback
 requestIdleCallback(workLoop);
+
 // update更新，把currentRoot(已经是旧树了)作为备用树alternate
 function update() {
-    // 渲染el
-    wipRoot = {
-        dom: currentRoot.dom,
-        props: currentRoot.props,
-        alternate: currentRoot // 设置 alternate 备用树
-    };
-    // 记录下本次渲染的根节点
-    nextWorkOfUnit = wipRoot;
+    let currentFiber = wipFiber;
+    return () => {
+        console.log('currentRoot:',currentRoot);
+        // 渲染el
+        wipRoot = {
+            ...currentFiber,
+            alternate: currentFiber // 设置 alternate 备用树
+        };
+        // 记录下本次渲染的根节点
+        nextWorkOfUnit = wipRoot;
+    }
 }
 
 const React = {
