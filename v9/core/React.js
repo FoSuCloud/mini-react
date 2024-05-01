@@ -62,16 +62,21 @@ function workLoop(deadline) {
     if (!nextWorkOfUnit && wipRoot) {
         commitRoot();
     }
+    // 为了setState 能够触发下一次 渲染
+    if(nextWorkOfUnit && !wipRoot){
+        wipRoot = currentRoot;
+    }
     // 下一个空闲周期继续执行
     requestIdleCallback(workLoop);
 }
 
 // 把dom操作统一提交给root，而不是单独操作dom
 function commitRoot() {
-    deletions.forEach(commitDeletion)
+    // console.log("=====commitRoot======");
+    deletions.forEach(commitDeletion);
     commitWork(wipRoot.child); // 根节点
     commitEffectHooks();
-    // console.log("root:", wipRoot);
+    // console.log("currentRoot:", currentRoot);
     currentRoot = wipRoot;
     wipRoot = null; // 表示本轮渲染结束
     deletions = []; // 已经删除完毕，恢复
@@ -143,7 +148,7 @@ function commitWork(fiber) {
     while (!fiberParent.dom) {
         fiberParent = fiberParent.parent;
     }
-    if (fiber.effectTag === "update") {
+    if (fiber.effectTag === "update" && fiber.dom) {
         updateProps(fiber.dom, fiber.props, fiber.alternate?.props);
     } else if (fiber.effectTag === "placement") {
         // function component
